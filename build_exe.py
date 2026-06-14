@@ -11,7 +11,7 @@ subprocess.check_call(
         "--onefile",
         "--windowed",
         "--name",
-        "佛脚刷题网页_半屏答题卡版",
+        "高通量刷题",
         "web_quiz_app.py",
     ]
 )
