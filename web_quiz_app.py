@@ -367,6 +367,36 @@ APP_HTML = r"""<!doctype html>
     .editor-grid label.wide { grid-column: 1 / -1; }
     .editor-grid textarea { min-height: 90px; }
     .editor-grid .tall { min-height: 170px; }
+    .options-editor { display: flex; flex-direction: column; gap: 8px; }
+    .option-editor-row {
+      background: var(--panel-soft);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px 12px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: flex-start;
+    }
+    .option-editor-row .opt-letter {
+      font-weight: 700;
+      color: var(--brand-strong);
+      min-width: 22px;
+      padding-top: 7px;
+      font-size: 15px;
+    }
+    .option-editor-row .opt-text { flex: 1; min-width: 160px; }
+    .option-editor-row .opt-imgs-wrap { flex: 2; min-width: 180px; display: flex; flex-direction: column; gap: 4px; }
+    .option-editor-row .opt-imgs { font-size: 13px; }
+    .option-editor-row .opt-imgs-preview {
+      display: flex; gap: 4px; flex-wrap: wrap;
+    }
+    .option-editor-row .opt-imgs-preview img {
+      width: 36px; height: 36px; object-fit: cover; border-radius: 4px;
+      border: 1px solid var(--line); cursor: pointer;
+    }
+    .option-editor-row .opt-imgs-preview img:hover { border-color: var(--brand); }
+    .option-editor-row button.opt-remove { color: var(--red-strong); flex-shrink: 0; }
     .editor-hint {
       margin-top: 10px;
       padding: 10px 12px;
@@ -753,9 +783,10 @@ APP_HTML = r"""<!doctype html>
           题干
           <textarea id="editStem" class="tall" placeholder="输入题干，支持 LaTeX"></textarea>
         </label>
-        <label class="wide">
+        <label class="wide" id="editOptionsSection">
           选项
-          <textarea id="editOptions" placeholder="每行一个选项，可写 A. 选项内容，也可只写内容"></textarea>
+          <div id="editOptionsContainer" class="options-editor"></div>
+          <button type="button" id="addOptionBtn" class="small" style="margin-top:6px">＋ 添加选项</button>
         </label>
         <label class="wide">
           解析
@@ -773,15 +804,9 @@ APP_HTML = r"""<!doctype html>
           <textarea id="editAnswerImages" placeholder="每行一个图片路径或 URL" style="min-height:50px"></textarea>
           <button type="button" class="small add-img-btn" data-target="editAnswerImages" data-preview="editAnswerPreview">📷 添加图片</button>
         </label>
-        <label class="wide">
-          选项图片
-          <div id="editOptionPreview" class="img-preview-row"></div>
-          <textarea id="editOptionImages" placeholder="格式：A: images/a.png；每行一个" style="min-height:50px"></textarea>
-          <button type="button" class="small add-img-btn" data-target="editOptionImages" data-preview="editOptionPreview">📷 添加图片</button>
-        </label>
       </div>
       <div class="editor-hint small">
-        保存后写入 user_data/user_data.json 并同步原始题库文件。点击「📷 添加图片」选择本地图片，自动复制到题库 images 文件夹。
+        保存后写入 user_data/user_data.json 并同步原始题库文件。每行选项旁的「📷」可上传图片，自动复制到题库 images 文件夹。
       </div>
       <div class="row" style="justify-content:flex-end;margin-top:14px">
         <button id="cancelQuestionEditBtn">取消</button>
@@ -833,6 +858,7 @@ let previewDragStart = { x: 0, y: 0, left: 0, top: 0 };
 let currentView = "welcome";
 
 const $ = id => document.getElementById(id);
+const $$ = (sel, parent) => (parent || document).querySelectorAll(sel);
 
 function openDb() {
   return new Promise((resolve, reject) => {
@@ -967,36 +993,6 @@ function parseOptionImages(value) {
     if (match) result[match[1].toUpperCase()] = splitList(match[2]);
   }
   return result;
-}
-
-function optionImagesToText(value) {
-  return Object.entries(value || {}).map(([letter, paths]) => `${letter}: ${splitList(paths).join(" | ")}`).join("\n");
-}
-
-function parseOptionImagesText(text) {
-  const result = {};
-  for (const line of String(text || "").split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    const match = trimmed.match(/^([A-Z])\s*[:：]\s*(.+)$/i);
-    if (!match) continue;
-    // Split by | (pipe) — safe for data URLs since pipe doesn't appear in them
-    result[match[1].toUpperCase()] = match[2].split(/\s*\|\s*/).map(s => s.trim()).filter(Boolean);
-  }
-  return result;
-}
-
-function optionsToText(options) {
-  return (options || []).map((option, idx) => `${String.fromCharCode(65 + idx)}. ${option}`).join("\n");
-}
-
-function parseOptionsText(text) {
-  return String(text || "")
-    .split(/\r?\n/)
-    .map(line => line.trim())
-    .filter(Boolean)
-    .map(line => line.replace(/^[A-Z]\s*[.．、)]\s*/i, "").trim())
-    .filter(Boolean);
 }
 
 function asQuestion(item) {
@@ -1548,6 +1544,130 @@ function renderCalendarHeatmap(bank) {
   $("calendarHeatmap").innerHTML = cells;
 }
 
+// ---------- Dynamic option editor ----------
+
+function _reletterOptionRows() {
+  const rows = $$(".option-editor-row", $("editOptionsContainer"));
+  rows.forEach((row, i) => {
+    const letter = String.fromCharCode(65 + i);
+    row.querySelector(".opt-letter").textContent = letter;
+    row.setAttribute("data-letter", letter);
+    const imgBtn = row.querySelector(".opt-img-btn");
+    if (imgBtn) imgBtn.setAttribute("data-letter", letter);
+  });
+  // Hide remove buttons if only 2 rows left
+  const removeBtns = $$(".opt-remove", $("editOptionsContainer"));
+  removeBtns.forEach(btn => { btn.style.display = rows.length <= 2 ? "none" : ""; });
+}
+
+function renderRowImagePreviews(rowEl) {
+  const letter = rowEl.getAttribute("data-letter");
+  const preview = rowEl.querySelector(".opt-imgs-preview");
+  if (!preview) return;
+  const imgInput = rowEl.querySelector(".opt-imgs");
+  const paths = (imgInput ? imgInput.value : "").split("|").map(s => s.trim()).filter(Boolean);
+  const bank = currentBank();
+  const bankName = bank ? bank.name : "";
+  preview.innerHTML = "";
+  paths.forEach(p => {
+    if (!p) return;
+    const img = document.createElement("img");
+    if (String(p).startsWith("data:")) {
+      img.src = p;
+    } else if (String(p).startsWith("/api/image")) {
+      img.src = p;
+    } else {
+      img.src = bankName ? `/api/image?bank=${encodeURIComponent(bankName)}&path=${encodeURIComponent(p)}` : p;
+    }
+    img.title = p;
+    img.alt = `选项${letter}图片`;
+    img.addEventListener("click", () => openImagePreview(img.src, img.alt));
+    img.onerror = () => { img.style.display = "none"; };
+    preview.appendChild(img);
+  });
+}
+
+function renderOptionEditor(q) {
+  const container = $("editOptionsContainer");
+  container.innerHTML = "";
+  const options = q.options || [];
+  const optPaths = (q._optionImagePaths && Object.keys(q._optionImagePaths).length) ? q._optionImagePaths : (q.optionImages || {});
+  // Ensure at least 2 rows for 选择题
+  const count = Math.max(options.length || 2, 2);
+  for (let i = 0; i < count; i++) {
+    const letter = String.fromCharCode(65 + i);
+    const text = options[i] || "";
+    const paths = (optPaths[letter] || []).join(" | ");
+    addOptionRow(null, letter, text, paths);
+  }
+  _reletterOptionRows();
+}
+
+function addOptionRow(afterEl, forceLetter, text, paths) {
+  const container = $("editOptionsContainer");
+  const rows = $$(".option-editor-row", container);
+  if (rows.length >= 26) return; // max A-Z
+  const letter = forceLetter || String.fromCharCode(65 + rows.length);
+  const row = document.createElement("div");
+  row.className = "option-editor-row";
+  row.setAttribute("data-letter", letter);
+  row.innerHTML = `
+    <span class="opt-letter">${letter}</span>
+    <input type="text" class="opt-text" placeholder="选项${letter}内容" value="${escapeHtml(text || "")}">
+    <div class="opt-imgs-wrap">
+      <input type="text" class="opt-imgs" placeholder="图片路径，多个用 | 分隔" value="${escapeHtml(paths || "")}">
+      <div class="opt-imgs-preview"></div>
+    </div>
+    <button type="button" class="small opt-img-btn" data-letter="${letter}" title="上传图片到选项${letter}">📷</button>
+    <button type="button" class="small opt-remove" title="删除选项${letter}">✕</button>
+  `;
+  // Insert after specific element or append
+  if (afterEl) {
+    afterEl.after(row);
+  } else {
+    container.appendChild(row);
+  }
+  // Wire up events
+  const imgBtn = row.querySelector(".opt-img-btn");
+  imgBtn.addEventListener("click", () => {
+    _imgUploadTarget = imgBtn;
+    $("imgUploadInput").click();
+  });
+  const removeBtn = row.querySelector(".opt-remove");
+  removeBtn.addEventListener("click", () => removeOptionRow(row));
+  const imgInput = row.querySelector(".opt-imgs");
+  imgInput.addEventListener("input", () => {
+    renderRowImagePreviews(row);
+  });
+  // Initial preview render
+  renderRowImagePreviews(row);
+  _reletterOptionRows();
+  return row;
+}
+
+function removeOptionRow(rowEl) {
+  const container = $("editOptionsContainer");
+  const rows = $$(".option-editor-row", container);
+  if (rows.length <= 2) return; // minimum 2 options
+  rowEl.remove();
+  _reletterOptionRows();
+}
+
+function collectOptionsFromEditor() {
+  const rows = $$(".option-editor-row", $("editOptionsContainer"));
+  const options = [];
+  const optionImagePaths = {};
+  rows.forEach(row => {
+    const letter = row.getAttribute("data-letter");
+    const text = row.querySelector(".opt-text").value.trim();
+    options.push(text);
+    const imgVal = row.querySelector(".opt-imgs").value.trim();
+    const paths = imgVal ? imgVal.split("|").map(s => s.trim()).filter(Boolean) : [];
+    if (paths.length) optionImagePaths[letter] = paths;
+  });
+  return { options, optionImagePaths };
+}
+
 function openQuestionEditor() {
   const q = current();
   const bank = currentBank();
@@ -1555,23 +1675,29 @@ function openQuestionEditor() {
   $("editType").value = q.normalizedType || "问答题";
   $("editAnswer").value = q.answer || "";
   $("editStem").value = q.stem || "";
-  $("editOptions").value = optionsToText(q.options || []);
   $("editAnalysis").value = q.analysis || "";
+  // Render dynamic option editor (only for 单选/多选题)
+  renderOptionEditor(q);
+  updateOptionSectionVisibility();
   // Show path fields: prefer _*Paths, fall back to stemImages (may be data URLs)
   const stemPaths = (q._stemImagePaths && q._stemImagePaths.length) ? q._stemImagePaths : q.stemImages;
   const answerPaths = (q._answerImagePaths && q._answerImagePaths.length) ? q._answerImagePaths : q.answerImages;
-  const optionPaths = (q._optionImagePaths && Object.keys(q._optionImagePaths).length) ? q._optionImagePaths : q.optionImages;
   $("editStemImages").value = splitList(stemPaths).join("\n");
   $("editAnswerImages").value = splitList(answerPaths).join("\n");
-  $("editOptionImages").value = optionImagesToText(optionPaths || {});
   // Render previews using data URLs for display
   renderImagePreviews("editStemPreview", q.stemImages, $("editStemImages").value);
   renderImagePreviews("editAnswerPreview", q.answerImages, $("editAnswerImages").value);
-  renderImagePreviews("editOptionPreview", null, $("editOptionImages").value, q.optionImages);
   $("questionEditorBackdrop").classList.add("open");
 }
 
-function renderImagePreviews(previewId, dataUrlList, pathText, optionImagesMap) {
+function updateOptionSectionVisibility() {
+  const type = $("editType").value;
+  const section = $("editOptionsSection");
+  const show = type === "单选题" || type === "多选题";
+  section.style.display = show ? "" : "none";
+}
+
+function renderImagePreviews(previewId, dataUrlList, pathText) {
   const container = $(previewId);
   if (!container) return;
   const bank = currentBank();
@@ -1583,26 +1709,15 @@ function renderImagePreviews(previewId, dataUrlList, pathText, optionImagesMap) 
     return bankName ? `/api/image?bank=${encodeURIComponent(bankName)}&path=${encodeURIComponent(p)}` : String(p);
   }
   container.innerHTML = "";
-  let entries = [];
-  if (previewId === "editOptionPreview") {
-    // For option images, parse from path text and look up data URLs
-    const optPaths = parseOptionImagesText(pathText || "");
-    const dataMap = optionImagesMap || {};
-    for (const [letter, paths] of Object.entries(optPaths)) {
-      const urls = dataMap[letter] || paths;
-      paths.forEach((p, i) => entries.push({ path: p, url: toDisplay(urls[i] || p), label: `${letter}: ` }));
-    }
-  } else {
-    const pathList = splitLines(pathText);
-    const urlList = splitList(dataUrlList);
-    pathList.forEach((p, i) => entries.push({ path: p, url: toDisplay(urlList[i] || p) }));
-  }
-  entries.forEach(({ path, url, label }) => {
+  const pathList = splitLines(pathText);
+  const urlList = splitList(dataUrlList);
+  pathList.forEach((p, i) => {
+    const url = toDisplay(urlList[i] || p);
     const thumb = document.createElement("img");
     thumb.className = "img-preview-thumb" + (String(url || "").startsWith("data:") ? " data-url" : "");
     thumb.src = String(url || "");
-    thumb.title = (label || "") + (String(path || ""));
-    thumb.addEventListener("click", () => openImagePreview(thumb.src, String(path || "")));
+    thumb.title = String(p || "");
+    thumb.addEventListener("click", () => openImagePreview(thumb.src, String(p || "")));
     thumb.onerror = () => { thumb.style.display = "none"; };
     container.appendChild(thumb);
   });
@@ -1617,6 +1732,7 @@ $("imgUploadInput").onchange = async event => {
   const bankName = bank ? bank.name : "未命名题库";
   const targetId = _imgUploadTarget.getAttribute("data-target");
   const previewId = _imgUploadTarget.getAttribute("data-preview");
+  const optLetter = _imgUploadTarget.getAttribute("data-letter");
   try {
     const formData = new FormData();
     formData.append("file", file);
@@ -1624,11 +1740,21 @@ $("imgUploadInput").onchange = async event => {
     const resp = await fetch("/api/upload-bank-image", { method: "POST", body: formData });
     const result = await resp.json();
     if (!result.ok) throw new Error(result.error || "上传失败");
-    const textarea = $(targetId);
     const newPath = result.path;
-    textarea.value = textarea.value.trim() ? textarea.value.trim() + "\n" + newPath : newPath;
-    // Refresh preview
-    renderImagePreviews(previewId, null, textarea.value, current().optionImages);
+    if (optLetter) {
+      // Per-row option image upload: append to the option row's image input
+      const row = _imgUploadTarget.closest(".option-editor-row");
+      if (row) {
+        const imgInput = row.querySelector(".opt-imgs");
+        imgInput.value = imgInput.value.trim() ? imgInput.value.trim() + " | " + newPath : newPath;
+        renderRowImagePreviews(row);
+      }
+    } else if (targetId) {
+      // Old-style stem/answer image upload
+      const textarea = $(targetId);
+      textarea.value = textarea.value.trim() ? textarea.value.trim() + "\n" + newPath : newPath;
+      renderImagePreviews(previewId, null, textarea.value);
+    }
   } catch (err) {
     alert("图片上传失败：" + err.message);
   }
@@ -1650,39 +1776,64 @@ async function saveQuestionEdit() {
   const q = current();
   const bank = currentBank();
   if (!q || !bank) return;
+  try {
   q.type = $("editType").value.trim();
   q.normalizedType = q.type;
   q.stem = $("editStem").value.trim();
-  q.options = parseOptionsText($("editOptions").value);
+  // Capture old _optionImagePaths before overwriting (used by buildOptionImagePathMap below)
+  const oldOptPaths = q._optionImagePaths;
+  // Collect options from dynamic editor (单选/多选) or use fixed/empty
+  if (q.normalizedType === "单选题" || q.normalizedType === "多选题") {
+    const collected = collectOptionsFromEditor();
+    q.options = collected.options;
+    q._optionImagePaths = collected.optionImagePaths;
+  } else if (q.normalizedType === "判断题") {
+    q.options = ["正确", "错误"];
+    q._optionImagePaths = {};
+  } else {
+    q.options = [];
+    q._optionImagePaths = {};
+  }
   q.answer = $("editAnswer").value.trim();
   q.analysis = $("editAnalysis").value.trim();
   // Build old path→dataURL maps BEFORE overwriting path fields
   const stemImageInput = $("editStemImages").value.trim();
   const answerImageInput = $("editAnswerImages").value.trim();
-  const optionImageInput = $("editOptionImages").value.trim();
   const oldStemMap = buildImagePathMap(q.stemImages, q._stemImagePaths);
   const oldAnswerMap = buildImagePathMap(q.answerImages, q._answerImagePaths);
-  const oldOptionMap = buildOptionImagePathMap(q.optionImages, q._optionImagePaths);
+  const oldOptionMap = buildOptionImagePathMap(q.optionImages, oldOptPaths);
   // Update original path fields from editor input (splitLines: newline-only, safe for data URLs)
   q._stemImagePaths = splitLines(stemImageInput);
   q._answerImagePaths = splitLines(answerImageInput);
-  q._optionImagePaths = parseOptionImagesText(optionImageInput);
   // For display fields: keep existing data URLs for unchanged paths
   let newStem = q._stemImagePaths.map(path => oldStemMap.get(path) || path);
   let newAnswer = q._answerImagePaths.map(path => oldAnswerMap.get(path) || path);
   const newOptionImages = {};
   for (const [letter, paths] of Object.entries(q._optionImagePaths)) {
-    newOptionImages[letter.toUpperCase()] = paths.map(path => (oldOptionMap.get(letter) || {}).get(path) || path);
+    newOptionImages[letter.toUpperCase()] = paths.map(path => (oldOptionMap.get(letter) || new Map()).get(path) || path);
   }
   // Auto-convert any remaining data URLs to files via backend
   const bankName = bank.name;
   const dataUrlStems = newStem.filter(u => String(u).startsWith("data:"));
   const dataUrlAnswers = newAnswer.filter(u => String(u).startsWith("data:"));
-  if (dataUrlStems.length || dataUrlAnswers.length) {
+  // Collect option image data URLs
+  const dataUrlOpts = [];
+  const optDataUrlMap = new Map(); // letter -> [indices]
+  for (const [letter, paths] of Object.entries(newOptionImages)) {
+    paths.forEach((p, i) => {
+      if (String(p).startsWith("data:")) {
+        dataUrlOpts.push(p);
+        if (!optDataUrlMap.has(letter)) optDataUrlMap.set(letter, []);
+        optDataUrlMap.get(letter).push(i);
+      }
+    });
+  }
+  if (dataUrlStems.length || dataUrlAnswers.length || dataUrlOpts.length) {
     try {
-      const [resS, resA] = await Promise.all([
+      const [resS, resA, resO] = await Promise.all([
         dataUrlStems.length ? fetch("/api/save-base64-images", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({bankName, images: dataUrlStems}) }).then(r => r.json()) : null,
         dataUrlAnswers.length ? fetch("/api/save-base64-images", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({bankName, images: dataUrlAnswers}) }).then(r => r.json()) : null,
+        dataUrlOpts.length ? fetch("/api/save-base64-images", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({bankName, images: dataUrlOpts}) }).then(r => r.json()) : null,
       ]);
       if (resS && resS.ok) {
         let j = 0;
@@ -1692,6 +1843,16 @@ async function saveQuestionEdit() {
         let j = 0;
         newAnswer = newAnswer.map(u => String(u).startsWith("data:") ? (resA.paths[j++] || u) : u);
       }
+      if (resO && resO.ok) {
+        let j = 0;
+        for (const [letter, indices] of optDataUrlMap) {
+          const paths = [...newOptionImages[letter]];
+          indices.forEach(idx => {
+            paths[idx] = resO.paths[j++] || paths[idx];
+          });
+          newOptionImages[letter] = paths;
+        }
+      }
     } catch (e) { console.warn("base64转换失败", e); }
   }
   // Update storage path fields with final file-path values
@@ -1700,9 +1861,9 @@ async function saveQuestionEdit() {
   q._optionImagePaths = newOptionImages;
   // Build display URLs: keep data URLs from oldStemMap, use /api/image for file paths
   function toDisplayUrl(path, oldMap, letter) {
-    if (String(path).startsWith("data:")) return path;
+    if (String(path).startsWith("data:") || String(path).startsWith("/api/image")) return path;
     // Try old map (path→dataURL)
-    const cached = letter ? (oldMap.get(letter) || {}).get(path) : oldMap.get(path);
+    const cached = letter ? (oldMap.get(letter) || new Map()).get(path) : oldMap.get(path);
     if (cached && String(cached).startsWith("data:")) return cached;
     // Fallback: use API endpoint to serve the file
     return `/api/image?bank=${encodeURIComponent(bankName)}&path=${encodeURIComponent(path)}`;
@@ -1723,7 +1884,11 @@ async function saveQuestionEdit() {
   closeQuestionEditor();
   renderQuestion();
   renderStats();
-  renderBankManager();
+  renderManagement();
+  } catch (e) {
+    console.error("保存失败:", e);
+    alert("保存失败：" + (e.message || "未知错误"));
+  }
 }
 
 // Build a map from original path -> data URL for stem/answer images,
@@ -1743,7 +1908,11 @@ function buildImagePathMap(dataUrls, paths) {
 
 function buildOptionImagePathMap(optionImages, optionPaths) {
   const map = new Map();
-  for (const letter of Object.keys(optionImages || {})) {
+  const allLetters = new Set([
+    ...Object.keys(optionImages || {}),
+    ...Object.keys(optionPaths || {}),
+  ]);
+  for (const letter of allLetters) {
     const urlList = splitList((optionImages || {})[letter]);
     const pathList = splitList((optionPaths || {})[letter]);
     const n = Math.min(urlList.length, pathList.length);
@@ -2073,7 +2242,8 @@ function renderQuestion() {
     $("freeInput").innerHTML = `<input id="fillInput" type="text" placeholder="输入答案"><div style="margin-top:10px"><button class="primary" id="fillSubmit">提交答案</button></div>`;
     $("fillSubmit").addEventListener("click", checkFill);
   } else {
-    $("freeInput").innerHTML = `<textarea id="qaInput" placeholder="可以先写自己的答案，再查看参考答案"></textarea>`;
+    $("freeInput").innerHTML = `<textarea id="qaInput" placeholder="可以先写自己的答案，再查看参考答案"></textarea><div style="margin-top:10px"><button class="primary" id="qaSubmit">提交答案</button></div>`;
+    $("qaSubmit").addEventListener("click", checkEssay);
   }
   const state = currentState();
   const result = state.results?.[q.id];
@@ -2099,11 +2269,17 @@ function renderQuestion() {
     } else if (q.normalizedType === "填空题") {
       if ($("fillInput") && resultSelection) $("fillInput").value = resultSelection;
       disablePracticeInputs();
+    } else if (q.normalizedType === "问答题") {
+      if ($("qaInput") && resultSelection) $("qaInput").value = resultSelection;
+      disablePracticeInputs();
     } else {
       disablePracticeInputs();
     }
     showAnswer();
   } else if (resultStatus === "seen") {
+    if (q.normalizedType === "问答题" && $("qaInput") && resultSelection) {
+      $("qaInput").value = resultSelection;
+    }
     showAnswer();
     disablePracticeInputs();
   }
@@ -2217,6 +2393,38 @@ function checkFill() {
   showAnswer(ok ? "回答正确。" : "回答不完全匹配。");
 }
 
+function checkEssay() {
+  const q = current();
+  if (!q || checked) return;
+  const user = $("qaInput") ? $("qaInput").value.trim() : "";
+  const state = currentState();
+  state.results ||= {};
+  state.results[q.id] = { status: "seen", selection: user };
+  saveBanks();
+  showAnswer(user ? "已提交答案，请核对参考答案。" : "未输入答案。");
+  // 禁用 textarea 但保留自评按钮可用
+  if ($("qaInput")) $("qaInput").disabled = true;
+  // 替换提交按钮为自评按钮
+  const btnArea = $("qaSubmit").parentNode;
+  btnArea.innerHTML = `<button class="primary" id="qaCorrect" style="background:#22c55e">答对了</button>
+    <button class="primary" id="qaWrong" style="background:#ef4444;margin-left:8px">答错了</button>`;
+  $("qaCorrect").addEventListener("click", () => selfAssessEssay(true));
+  $("qaWrong").addEventListener("click", () => selfAssessEssay(false));
+  renderQuestionMap();
+}
+
+async function selfAssessEssay(ok) {
+  const q = current();
+  if (!q) return;
+  // 移除自评按钮
+  const btnArea = $("qaCorrect") ? $("qaCorrect").parentNode : null;
+  if (btnArea) btnArea.innerHTML = "";
+  // 调用 record 正式记录对错
+  await record(ok);
+  // record 内部已调用 saveBanks + renderStats + renderQuestionMap
+  disablePracticeInputs();
+}
+
 function showAnswer(prefix = "") {
   const q = current();
   if (!q) return;
@@ -2232,7 +2440,7 @@ function showAnswer(prefix = "") {
   if (!state.results[q.id]) {
     const selection = q.normalizedType === "填空题"
       ? ($("fillInput") ? $("fillInput").value.trim() : "")
-      : q.normalizedType === "问答题" ? ""
+      : q.normalizedType === "问答题" ? ($("qaInput") ? $("qaInput").value.trim() : "")
       : q.normalizedType === "判断题" ? [...selected][0] || ""
       : [...selected].sort().join("");
     state.results[q.id] = { status: "seen", selection };
@@ -2251,7 +2459,7 @@ async function record(ok) {
   state.results ||= {};
   const selection = q.normalizedType === "填空题"
     ? ($("fillInput") ? $("fillInput").value.trim() : "")
-    : q.normalizedType === "问答题" ? ""
+    : q.normalizedType === "问答题" ? ($("qaInput") ? $("qaInput").value.trim() : "")
     : q.normalizedType === "判断题" ? [...selected][0] || ""
     : [...selected].sort().join("");
   state.results[q.id] = { status: ok ? "correct" : "wrong", selection };
@@ -2449,6 +2657,8 @@ async function boot() {
   $("closeQuestionEditorBtn").onclick = closeQuestionEditor;
   $("cancelQuestionEditBtn").onclick = closeQuestionEditor;
   $("saveQuestionEditBtn").onclick = saveQuestionEdit;
+  $("editType").onchange = updateOptionSectionVisibility;
+  $("addOptionBtn").onclick = () => addOptionRow();
   $("questionEditorBackdrop").onclick = event => { if (event.target === $("questionEditorBackdrop")) closeQuestionEditor(); };
   $("mapBtn").onclick = openQuestionMap;
   $("closeMapBtn").onclick = closeQuestionMap;
@@ -2716,9 +2926,15 @@ class Handler(BaseHTTPRequestHandler):
                         continue
                     headers_text = part[:header_end].decode("utf-8", errors="ignore")
                     part_body = part[header_end:]
-                    while part_body.startswith(b"\r\n"):
+                    # Strip exactly one blank line after headers (\r\n\r\n or \n\n), not arbitrary leading newlines
+                    # (using while would corrupt binary body data that starts with 0x0D 0x0A)
+                    if part_body.startswith(b"\r\n\r\n"):
+                        part_body = part_body[4:]
+                    elif part_body.startswith(b"\r\n"):
                         part_body = part_body[2:]
-                    while part_body.startswith(b"\n"):
+                    elif part_body.startswith(b"\n\n"):
+                        part_body = part_body[2:]
+                    elif part_body.startswith(b"\n"):
                         part_body = part_body[1:]
                     name = ""
                     filename = None
