@@ -4,11 +4,14 @@ import re
 import socket
 import threading
 import time
+import hashlib
+import base64
 import urllib.parse
 import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from io import BytesIO
 
 
 APP_ROOT = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
@@ -45,6 +48,44 @@ def save_user_data(data: dict) -> None:
     tmp = USER_DATA_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(USER_DATA_FILE)
+
+
+def data_url_to_bytes(data_url: str) -> bytes | None:
+    """Convert a data: URL to raw bytes. Returns None on failure."""
+    if not data_url or not data_url.startswith("data:"):
+        return None
+    try:
+        header, b64 = data_url.split(",", 1)
+        return base64.b64decode(b64)
+    except Exception:
+        return None
+
+
+def save_image_to_bank(bank_name: str, image_data: bytes, ext: str = ".jpg") -> str:
+    """Save raw image bytes to <APP_ROOT>/<bank_name>/images/<sha256>.ext and return relative path."""
+    folder = APP_ROOT / bank_name / "images"
+    folder.mkdir(parents=True, exist_ok=True)
+    sha = hashlib.sha256(image_data).hexdigest()
+    fname = f"{sha}{ext}"
+    (folder / fname).write_bytes(image_data)
+    return f"images/{fname}"
+
+
+def decode_and_save_images(bank_name: str, image_list: list) -> list[str]:
+    """Take a list of image strings (data URLs or paths). Save data URLs as files, pass paths through."""
+    result = []
+    for src in (image_list or []):
+        if not src:
+            continue
+        if src.startswith("data:"):
+            raw = data_url_to_bytes(src)
+            if raw:
+                result.append(save_image_to_bank(bank_name, raw))
+            else:
+                result.append(src)
+        else:
+            result.append(src)
+    return result
 
 
 APP_HTML = r"""<!doctype html>
@@ -401,6 +442,10 @@ APP_HTML = r"""<!doctype html>
       padding: 8px;
     }
     .hidden-file { width: 1px; height: 1px; opacity: 0; position: absolute; pointer-events: none; }
+    .img-preview-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; min-height: 24px; }
+    .img-preview-thumb { width: 48px; height: 48px; border: 1px solid var(--line); border-radius: 4px; object-fit: cover; background: #fff; cursor: pointer; }
+    .img-preview-thumb.data-url { border-color: #f59e0b; }
+    .add-img-btn { width: auto; font-size: 12px; padding: 4px 10px; margin-top: 4px; }
     /* ===== Nav Sidebar ===== */
     .nav-item { border-bottom: 1px solid var(--line); }
     .nav-header {
@@ -680,6 +725,7 @@ APP_HTML = r"""<!doctype html>
   <input id="folderInput" class="hidden-file" type="file" webkitdirectory directory multiple>
   <input id="jsonInput" class="hidden-file" type="file" accept=".json,application/json">
   <input id="userDataInput" class="hidden-file" type="file" accept=".json,application/json">
+  <input id="imgUploadInput" class="hidden-file" type="file" accept="image/*">
 
   <div id="drawerBackdrop" class="drawer-backdrop"></div>
   <div id="questionEditorBackdrop" class="modal-backdrop">
@@ -717,19 +763,25 @@ APP_HTML = r"""<!doctype html>
         </label>
         <label class="wide">
           题干图片
-          <textarea id="editStemImages" placeholder="每行一个图片路径或 URL"></textarea>
+          <div id="editStemPreview" class="img-preview-row"></div>
+          <textarea id="editStemImages" placeholder="每行一个图片路径或 URL" style="min-height:50px"></textarea>
+          <button type="button" class="small add-img-btn" data-target="editStemImages" data-preview="editStemPreview">📷 添加图片</button>
         </label>
         <label class="wide">
           答案图片
-          <textarea id="editAnswerImages" placeholder="每行一个图片路径或 URL"></textarea>
+          <div id="editAnswerPreview" class="img-preview-row"></div>
+          <textarea id="editAnswerImages" placeholder="每行一个图片路径或 URL" style="min-height:50px"></textarea>
+          <button type="button" class="small add-img-btn" data-target="editAnswerImages" data-preview="editAnswerPreview">📷 添加图片</button>
         </label>
         <label class="wide">
           选项图片
-          <textarea id="editOptionImages" placeholder="格式：A: images/a.png；每行一个"></textarea>
+          <div id="editOptionPreview" class="img-preview-row"></div>
+          <textarea id="editOptionImages" placeholder="格式：A: images/a.png；每行一个" style="min-height:50px"></textarea>
+          <button type="button" class="small add-img-btn" data-target="editOptionImages" data-preview="editOptionPreview">📷 添加图片</button>
         </label>
       </div>
       <div class="editor-hint small">
-        保存后会立即写入程序目录的 user_data/user_data.json。选项图片示例：A: images/a.png；多个图片可用分号分隔。
+        保存后写入 user_data/user_data.json 并同步原始题库文件。点击「📷 添加图片」选择本地图片，自动复制到题库 images 文件夹。
       </div>
       <div class="row" style="justify-content:flex-end;margin-top:14px">
         <button id="cancelQuestionEditBtn">取消</button>
@@ -894,6 +946,13 @@ function splitList(value) {
   return String(value).split(/\r?\n|[;；,，]/).map(s => s.trim()).filter(Boolean);
 }
 
+// Split by newlines only — safe for data URLs (which contain commas and semicolons)
+function splitLines(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.map(String).map(s => s.trim()).filter(Boolean);
+  return String(value).split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+}
+
 function splitOptions(value) {
   if (Array.isArray(value)) return value.map(String).map(s => s.trim()).filter(Boolean);
   return splitList(value).map(s => s.replace(/^[A-ZＡ-Ｚ][.、:：)]\s*/i, ""));
@@ -911,7 +970,7 @@ function parseOptionImages(value) {
 }
 
 function optionImagesToText(value) {
-  return Object.entries(value || {}).map(([letter, paths]) => `${letter}: ${splitList(paths).join("; ")}`).join("\n");
+  return Object.entries(value || {}).map(([letter, paths]) => `${letter}: ${splitList(paths).join(" | ")}`).join("\n");
 }
 
 function parseOptionImagesText(text) {
@@ -921,7 +980,8 @@ function parseOptionImagesText(text) {
     if (!trimmed) continue;
     const match = trimmed.match(/^([A-Z])\s*[:：]\s*(.+)$/i);
     if (!match) continue;
-    result[match[1].toUpperCase()] = splitList(match[2]);
+    // Split by | (pipe) — safe for data URLs since pipe doesn't appear in them
+    result[match[1].toUpperCase()] = match[2].split(/\s*\|\s*/).map(s => s.trim()).filter(Boolean);
   }
   return result;
 }
@@ -950,6 +1010,9 @@ function asQuestion(item) {
     stemImages: splitList(item.stemImages || item.stem_images || item["题干图片"]),
     optionImages: parseOptionImages(item.optionImages || item.option_images || item["选项图片"]),
     answerImages: splitList(item.answerImages || item.answer_images || item["答案图片"]),
+    _stemImagePaths: splitList(item._stemImagePaths || item.stemImagePaths || item["题干图片"]),
+    _optionImagePaths: parseOptionImages(item._optionImagePaths || item.optionImagePaths || item["选项图片"]),
+    _answerImagePaths: splitList(item._answerImagePaths || item.answerImagePaths || item["答案图片"]),
   };
   q.normalizedType = normalizeType(q);
   return q;
@@ -985,6 +1048,8 @@ async function importFolder(files) {
   const jsonFiles = list.filter(file => file.name.toLowerCase().endsWith(".json"));
   if (!jsonFiles.length) throw new Error("文件夹里没有找到 JSON 题库文件。");
   const jsonFile = jsonFiles[0];
+  const folderName = folderNameFromFiles(files, jsonFile.name.replace(/\.json$/i, ""));
+  const sourceFile = `${folderName}/${jsonFile.name}`;
   const fileMap = new Map();
   for (const file of list) {
     fileMap.set(normPath(file.webkitRelativePath || file.name), file);
@@ -995,6 +1060,14 @@ async function importFolder(files) {
   const imported = [];
   for (const item of raw) {
     const q = asQuestion(item);
+    // Save original relative paths before resolving to data URLs
+    q._stemImagePaths = [...q.stemImages];
+    q._optionImagePaths = {};
+    for (const [letter, paths] of Object.entries(q.optionImages || {})) {
+      q._optionImagePaths[letter.toUpperCase()] = [...splitList(paths)];
+    }
+    q._answerImagePaths = [...q.answerImages];
+    // Resolve to data URLs for display
     q.stemImages = await resolveImageList(q.stemImages, fileMap);
     const nextOptionImages = {};
     for (const [letter, paths] of Object.entries(q.optionImages || {})) {
@@ -1004,18 +1077,18 @@ async function importFolder(files) {
     q.answerImages = await resolveImageList(q.answerImages, fileMap);
     imported.push(q);
   }
-  await addBank(folderNameFromFiles(files, jsonFile.name.replace(/\.json$/i, "")), imported);
+  await addBank(folderName, imported, sourceFile, "folder");
   alert(`已创建题库"${currentBank()?.name || ""}"，导入 ${imported.length} 道题。`);
 }
 
 async function importJson(file) {
   const raw = JSON.parse(await file.text());
   if (!Array.isArray(raw)) throw new Error("JSON 顶层必须是题目数组。");
-  await addBank(file.name.replace(/\.json$/i, ""), raw.map(asQuestion));
+  await addBank(file.name.replace(/\.json$/i, ""), raw.map(asQuestion), file.name, "json");
   alert(`已创建题库"${currentBank()?.name || ""}"，导入 ${raw.length} 道题。只导入 JSON 时，浏览器通常不能直接读取本地图片路径；带图片请用"导入题库文件夹"。`);
 }
 
-async function addBank(name, questions) {
+async function addBank(name, questions, sourceFile = null, sourceType = null) {
   const seen = new Set();
   for (const q of questions) {
     if (seen.has(q.id)) q.id = uid();
@@ -1028,6 +1101,8 @@ async function addBank(name, questions) {
     questions,
     state: { favorites: [], wrong: {} },
     createdAt: new Date().toISOString(),
+    sourceFile: sourceFile || null,
+    sourceType: sourceType || null,
   };
   banks.push(bank);
   currentBankId = bank.id;
@@ -1475,17 +1550,97 @@ function renderCalendarHeatmap(bank) {
 
 function openQuestionEditor() {
   const q = current();
+  const bank = currentBank();
   if (!q) return;
   $("editType").value = q.normalizedType || "问答题";
   $("editAnswer").value = q.answer || "";
   $("editStem").value = q.stem || "";
   $("editOptions").value = optionsToText(q.options || []);
   $("editAnalysis").value = q.analysis || "";
-  $("editStemImages").value = splitList(q.stemImages).join("\n");
-  $("editAnswerImages").value = splitList(q.answerImages).join("\n");
-  $("editOptionImages").value = optionImagesToText(q.optionImages || {});
+  // Show path fields: prefer _*Paths, fall back to stemImages (may be data URLs)
+  const stemPaths = (q._stemImagePaths && q._stemImagePaths.length) ? q._stemImagePaths : q.stemImages;
+  const answerPaths = (q._answerImagePaths && q._answerImagePaths.length) ? q._answerImagePaths : q.answerImages;
+  const optionPaths = (q._optionImagePaths && Object.keys(q._optionImagePaths).length) ? q._optionImagePaths : q.optionImages;
+  $("editStemImages").value = splitList(stemPaths).join("\n");
+  $("editAnswerImages").value = splitList(answerPaths).join("\n");
+  $("editOptionImages").value = optionImagesToText(optionPaths || {});
+  // Render previews using data URLs for display
+  renderImagePreviews("editStemPreview", q.stemImages, $("editStemImages").value);
+  renderImagePreviews("editAnswerPreview", q.answerImages, $("editAnswerImages").value);
+  renderImagePreviews("editOptionPreview", null, $("editOptionImages").value, q.optionImages);
   $("questionEditorBackdrop").classList.add("open");
 }
+
+function renderImagePreviews(previewId, dataUrlList, pathText, optionImagesMap) {
+  const container = $(previewId);
+  if (!container) return;
+  const bank = currentBank();
+  const bankName = bank ? bank.name : "";
+  // Convert a path to a displayable URL (data URL or API URL)
+  function toDisplay(p) {
+    if (!p) return p;
+    if (String(p).startsWith("data:") || String(p).startsWith("/api/image")) return String(p);
+    return bankName ? `/api/image?bank=${encodeURIComponent(bankName)}&path=${encodeURIComponent(p)}` : String(p);
+  }
+  container.innerHTML = "";
+  let entries = [];
+  if (previewId === "editOptionPreview") {
+    // For option images, parse from path text and look up data URLs
+    const optPaths = parseOptionImagesText(pathText || "");
+    const dataMap = optionImagesMap || {};
+    for (const [letter, paths] of Object.entries(optPaths)) {
+      const urls = dataMap[letter] || paths;
+      paths.forEach((p, i) => entries.push({ path: p, url: toDisplay(urls[i] || p), label: `${letter}: ` }));
+    }
+  } else {
+    const pathList = splitLines(pathText);
+    const urlList = splitList(dataUrlList);
+    pathList.forEach((p, i) => entries.push({ path: p, url: toDisplay(urlList[i] || p) }));
+  }
+  entries.forEach(({ path, url, label }) => {
+    const thumb = document.createElement("img");
+    thumb.className = "img-preview-thumb" + (String(url || "").startsWith("data:") ? " data-url" : "");
+    thumb.src = String(url || "");
+    thumb.title = (label || "") + (String(path || ""));
+    thumb.addEventListener("click", () => openImagePreview(thumb.src, String(path || "")));
+    thumb.onerror = () => { thumb.style.display = "none"; };
+    container.appendChild(thumb);
+  });
+}
+
+// Image upload handler
+let _imgUploadTarget = null;
+$("imgUploadInput").onchange = async event => {
+  const file = event.target.files[0];
+  if (!file || !_imgUploadTarget) { event.target.value = ""; return; }
+  const bank = currentBank();
+  const bankName = bank ? bank.name : "未命名题库";
+  const targetId = _imgUploadTarget.getAttribute("data-target");
+  const previewId = _imgUploadTarget.getAttribute("data-preview");
+  try {
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("bankName", bankName);
+    const resp = await fetch("/api/upload-bank-image", { method: "POST", body: formData });
+    const result = await resp.json();
+    if (!result.ok) throw new Error(result.error || "上传失败");
+    const textarea = $(targetId);
+    const newPath = result.path;
+    textarea.value = textarea.value.trim() ? textarea.value.trim() + "\n" + newPath : newPath;
+    // Refresh preview
+    renderImagePreviews(previewId, null, textarea.value, current().optionImages);
+  } catch (err) {
+    alert("图片上传失败：" + err.message);
+  }
+  event.target.value = "";
+  _imgUploadTarget = null;
+};
+document.querySelectorAll(".add-img-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    _imgUploadTarget = btn;
+    $("imgUploadInput").click();
+  });
+});
 
 function closeQuestionEditor() {
   $("questionEditorBackdrop").classList.remove("open");
@@ -1501,17 +1656,120 @@ async function saveQuestionEdit() {
   q.options = parseOptionsText($("editOptions").value);
   q.answer = $("editAnswer").value.trim();
   q.analysis = $("editAnalysis").value.trim();
-  q.stemImages = splitList($("editStemImages").value);
-  q.answerImages = splitList($("editAnswerImages").value);
-  q.optionImages = parseOptionImagesText($("editOptionImages").value);
+  // Build old path→dataURL maps BEFORE overwriting path fields
+  const stemImageInput = $("editStemImages").value.trim();
+  const answerImageInput = $("editAnswerImages").value.trim();
+  const optionImageInput = $("editOptionImages").value.trim();
+  const oldStemMap = buildImagePathMap(q.stemImages, q._stemImagePaths);
+  const oldAnswerMap = buildImagePathMap(q.answerImages, q._answerImagePaths);
+  const oldOptionMap = buildOptionImagePathMap(q.optionImages, q._optionImagePaths);
+  // Update original path fields from editor input (splitLines: newline-only, safe for data URLs)
+  q._stemImagePaths = splitLines(stemImageInput);
+  q._answerImagePaths = splitLines(answerImageInput);
+  q._optionImagePaths = parseOptionImagesText(optionImageInput);
+  // For display fields: keep existing data URLs for unchanged paths
+  let newStem = q._stemImagePaths.map(path => oldStemMap.get(path) || path);
+  let newAnswer = q._answerImagePaths.map(path => oldAnswerMap.get(path) || path);
+  const newOptionImages = {};
+  for (const [letter, paths] of Object.entries(q._optionImagePaths)) {
+    newOptionImages[letter.toUpperCase()] = paths.map(path => (oldOptionMap.get(letter) || {}).get(path) || path);
+  }
+  // Auto-convert any remaining data URLs to files via backend
+  const bankName = bank.name;
+  const dataUrlStems = newStem.filter(u => String(u).startsWith("data:"));
+  const dataUrlAnswers = newAnswer.filter(u => String(u).startsWith("data:"));
+  if (dataUrlStems.length || dataUrlAnswers.length) {
+    try {
+      const [resS, resA] = await Promise.all([
+        dataUrlStems.length ? fetch("/api/save-base64-images", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({bankName, images: dataUrlStems}) }).then(r => r.json()) : null,
+        dataUrlAnswers.length ? fetch("/api/save-base64-images", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({bankName, images: dataUrlAnswers}) }).then(r => r.json()) : null,
+      ]);
+      if (resS && resS.ok) {
+        let j = 0;
+        newStem = newStem.map(u => String(u).startsWith("data:") ? (resS.paths[j++] || u) : u);
+      }
+      if (resA && resA.ok) {
+        let j = 0;
+        newAnswer = newAnswer.map(u => String(u).startsWith("data:") ? (resA.paths[j++] || u) : u);
+      }
+    } catch (e) { console.warn("base64转换失败", e); }
+  }
+  // Update storage path fields with final file-path values
+  q._stemImagePaths = newStem;
+  q._answerImagePaths = newAnswer;
+  q._optionImagePaths = newOptionImages;
+  // Build display URLs: keep data URLs from oldStemMap, use /api/image for file paths
+  function toDisplayUrl(path, oldMap, letter) {
+    if (String(path).startsWith("data:")) return path;
+    // Try old map (path→dataURL)
+    const cached = letter ? (oldMap.get(letter) || {}).get(path) : oldMap.get(path);
+    if (cached && String(cached).startsWith("data:")) return cached;
+    // Fallback: use API endpoint to serve the file
+    return `/api/image?bank=${encodeURIComponent(bankName)}&path=${encodeURIComponent(path)}`;
+  }
+  q.stemImages = newStem.map(p => toDisplayUrl(p, oldStemMap));
+  q.answerImages = newAnswer.map(p => toDisplayUrl(p, oldAnswerMap));
+  const newOptDisplay = {};
+  for (const [letter, paths] of Object.entries(newOptionImages)) {
+    newOptDisplay[letter.toUpperCase()] = paths.map(p => toDisplayUrl(p, oldOptionMap, letter));
+  }
+  q.optionImages = newOptDisplay;
   q.normalizedType = normalizeType(q);
   const bankQuestion = bank.questions.find(item => item.id === q.id);
   if (bankQuestion && bankQuestion !== q) Object.assign(bankQuestion, q);
   await saveBanks();
+  // Sync back to source file
+  saveSourceBank(bank);
   closeQuestionEditor();
   renderQuestion();
   renderStats();
   renderBankManager();
+}
+
+// Build a map from original path -> data URL for stem/answer images,
+// so that editing paths doesn't lose existing data URLs for unchanged entries.
+function buildImagePathMap(dataUrls, paths) {
+  const map = new Map();
+  const urlList = splitList(dataUrls);
+  const pathList = splitList(paths);
+  const n = Math.min(urlList.length, pathList.length);
+  for (let i = 0; i < n; i++) {
+    if (urlList[i] && urlList[i].startsWith("data:")) {
+      map.set(pathList[i], urlList[i]);
+    }
+  }
+  return map;
+}
+
+function buildOptionImagePathMap(optionImages, optionPaths) {
+  const map = new Map();
+  for (const letter of Object.keys(optionImages || {})) {
+    const urlList = splitList((optionImages || {})[letter]);
+    const pathList = splitList((optionPaths || {})[letter]);
+    const n = Math.min(urlList.length, pathList.length);
+    const inner = new Map();
+    for (let i = 0; i < n; i++) {
+      if (urlList[i] && urlList[i].startsWith("data:")) {
+        inner.set(pathList[i], urlList[i]);
+      }
+    }
+    map.set(letter, inner);
+  }
+  return map;
+}
+
+async function saveSourceBank(bank) {
+  try {
+    const resp = await fetch("/api/save-source-bank", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ bankId: bank.id, sourceFile: bank.sourceFile, bankName: bank.name, questions: bank.questions }),
+    });
+    const result = await resp.json();
+    if (!result.ok) console.warn("同步源文件失败:", result.error);
+  } catch (err) {
+    console.warn("同步源文件失败:", err);
+  }
 }
 
 function questionSearchText(q) {
@@ -1613,13 +1871,16 @@ function renderRichText(target, text) {
   target.innerHTML = richHtml(text);
 }
 
-function renderMedia(target, images, alt = "题目图片") {
+function renderMedia(target, images, alt = "题目图片", bankName = "") {
   target.innerHTML = "";
   for (const src of images || []) {
     const img = document.createElement("img");
-    img.src = src;
+    const url = (String(src).startsWith("data:") || String(src).startsWith("/api/image"))
+      ? src
+      : (bankName ? `/api/image?bank=${encodeURIComponent(bankName)}&path=${encodeURIComponent(src)}` : src);
+    img.src = url;
     img.alt = alt;
-    img.addEventListener("click", () => openImagePreview(src, alt));
+    img.addEventListener("click", () => openImagePreview(url, alt));
     target.appendChild(img);
   }
 }
@@ -1780,7 +2041,7 @@ function renderQuestion() {
   $("favBtn").disabled = false;
   $("favBtn").textContent = (currentState().favorites || []).includes(q.id) ? "★ 已收藏" : "☆ 收藏";
   $("stem").innerHTML = `<span class="tag">${escapeHtml(q.normalizedType)}</span>${richHtml(q.stem)}`;
-  renderMedia($("stemMedia"), q.stemImages, "题干图片");
+  renderMedia($("stemMedia"), q.stemImages, "题干图片", bank ? bank.name : "");
 
   if (q.normalizedType === "单选题" || q.normalizedType === "多选题") {
     q.options.forEach((option, i) => {
@@ -1789,7 +2050,7 @@ function renderQuestion() {
       btn.className = "option";
       btn.dataset.letter = letter;
       btn.innerHTML = `<strong>${letter}.</strong><div class="option-text">${richHtml(option)}</div><div class="media"></div>`;
-      renderMedia(btn.querySelector(".media"), (q.optionImages || {})[letter] || [], "选项图片");
+      renderMedia(btn.querySelector(".media"), (q.optionImages || {})[letter] || [], "选项图片", bank ? bank.name : "");
       btn.addEventListener("click", () => chooseOption(letter));
       $("options").appendChild(btn);
     });
@@ -1963,7 +2224,8 @@ function showAnswer(prefix = "") {
   if (q.normalizedType === "填空题" && !answer) answer = fillAnswers(q).join("；");
   $("answer").classList.remove("muted");
   renderRichText($("answer"), `${prefix ? prefix + "\n" : ""}正确答案：${answer || "（空）"}\n解析：${q.analysis || ""}`);
-  renderMedia($("answerMedia"), q.answerImages, "答案图片");
+  const b = currentBank();
+  renderMedia($("answerMedia"), q.answerImages, "答案图片", b ? b.name : "");
   $("searchAnswerBtn").style.display = looksEmptyAnswer(answer) ? "" : "none";
   const state = currentState();
   state.results ||= {};
@@ -2040,7 +2302,18 @@ function exportBank() {
     alert("当前没有题库可导出。");
     return;
   }
-  const blob = new Blob([JSON.stringify(bank.questions, null, 2)], {type: "application/json"});
+  // Export using relative paths (not data URLs) when available
+  const cleaned = bank.questions.map(q => ({
+    题型: q.normalizedType || q.type || "问答题",
+    题干: q.stem || "",
+    选项: q.options || [],
+    答案: q.answer || "",
+    解析: q.analysis || "",
+    题干图片: (q._stemImagePaths && q._stemImagePaths.length ? q._stemImagePaths : q.stemImages) || [],
+    选项图片: (q._optionImagePaths && Object.keys(q._optionImagePaths).length ? q._optionImagePaths : q.optionImages) || {},
+    答案图片: (q._answerImagePaths && q._answerImagePaths.length ? q._answerImagePaths : q.answerImages) || [],
+  }));
+  const blob = new Blob([JSON.stringify(cleaned, null, 2)], {type: "application/json"});
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
   a.download = `${bank.name || "题库"}_导出.json`;
@@ -2066,6 +2339,8 @@ async function importUserData(file) {
       results: bank.state?.results && typeof bank.state.results === "object" ? bank.state.results : {},
     },
     createdAt: bank.createdAt || new Date().toISOString(),
+    sourceFile: bank.sourceFile || null,
+    sourceType: bank.sourceType || null,
   }));
   currentBankId = typeof data.currentBankId === "string" && banks.some(bank => bank.id === data.currentBankId)
     ? data.currentBankId
@@ -2349,6 +2624,56 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
             return
+        if self.path.startswith("/api/image"):
+            params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            bank_name = params.get("bank", [""])[0]
+            img_path = params.get("path", [""])[0]
+            if not bank_name or not img_path:
+                self.send_json({"ok": False, "error": "缺少 bank 或 path 参数"}, 400)
+                return
+            # Resolve image file: try APP_ROOT/bank/path, then APP_ROOT/bank/images/filename
+            raw_path = Path(img_path)
+            candidates = [
+                APP_ROOT / bank_name / raw_path,
+                APP_ROOT / bank_name / "images" / raw_path.name,
+            ]
+            # Also search subdirectories of bank for the filename
+            bank_dir = APP_ROOT / bank_name
+            if bank_dir.exists():
+                for f in bank_dir.rglob(raw_path.name):
+                    if f not in candidates:
+                        candidates.append(f)
+            served = False
+            for file_path in candidates:
+                try:
+                    resolved = file_path.resolve()
+                    # Security: ensure we don't escape APP_ROOT
+                    if not str(resolved).startswith(str(APP_ROOT.resolve())):
+                        continue
+                    if not resolved.is_file():
+                        continue
+                    ext = resolved.suffix.lower()
+                    mime_map = {
+                        ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                        ".png": "image/png", ".gif": "image/gif",
+                        ".webp": "image/webp", ".svg": "image/svg+xml",
+                        ".bmp": "image/bmp",
+                    }
+                    content_type = mime_map.get(ext, "application/octet-stream")
+                    data = resolved.read_bytes()
+                    self.send_response(200)
+                    self.send_header("Content-Type", content_type)
+                    self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Cache-Control", "max-age=86400")
+                    self.end_headers()
+                    self.wfile.write(data)
+                    served = True
+                    break
+                except (OSError, ValueError):
+                    continue
+            if not served:
+                self.send_json({"ok": False, "error": "图片文件未找到"}, 404)
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
@@ -2356,6 +2681,139 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(APP_HTML.encode("utf-8"))
 
     def do_POST(self):
+        if self.path.startswith("/api/upload-bank-image"):
+            try:
+                ctype = self.headers.get("Content-Type", "")
+                length = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(length)
+                # Parse multipart form data
+                boundary = None
+                for part in ctype.split(";"):
+                    part = part.strip()
+                    if part.startswith("boundary="):
+                        boundary = part.split("=", 1)[1].strip('"').strip("'")
+                        break
+                if not boundary:
+                    raise ValueError("缺少 multipart boundary")
+                boundary_bytes = boundary.encode("utf-8")
+                b_boundary = b"--" + boundary_bytes
+                # Split into parts
+                parts = body.split(b_boundary)[1:-1]  # first and last are empty/epilogue
+                img_data = None
+                bank_name = ""
+                for part in parts:
+                    if part.startswith(b"\r\n"):
+                        part = part[2:]
+                    elif part.startswith(b"\n"):
+                        part = part[1:]
+                    if part.endswith(b"\r\n"):
+                        part = part[:-2]
+                    # Split headers from body
+                    header_end = part.find(b"\r\n\r\n")
+                    if header_end == -1:
+                        header_end = part.find(b"\n\n")
+                    if header_end == -1:
+                        continue
+                    headers_text = part[:header_end].decode("utf-8", errors="ignore")
+                    part_body = part[header_end:]
+                    while part_body.startswith(b"\r\n"):
+                        part_body = part_body[2:]
+                    while part_body.startswith(b"\n"):
+                        part_body = part_body[1:]
+                    name = ""
+                    filename = None
+                    for hline in headers_text.split("\r\n"):
+                        if ";" in hline:
+                            for seg in hline.split(";"):
+                                seg = seg.strip()
+                                if seg.startswith('name="'):
+                                    name = seg.split('"')[1]
+                                elif seg.startswith('name='):
+                                    name = seg.split("=", 1)[1].strip('"')
+                                if seg.strip().startswith('filename="'):
+                                    filename = seg.strip().split('"')[1]
+                    if name == "file":
+                        img_data = part_body
+                    elif name == "bankName":
+                        bank_name = part_body.decode("utf-8", errors="ignore").strip()
+                if not img_data or not bank_name:
+                    raise ValueError("缺少图片文件或题库名称")
+                path = save_image_to_bank(bank_name, img_data)
+                self.send_json({"ok": True, "path": path})
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, 400)
+            return
+        if self.path.startswith("/api/save-base64-images"):
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                raw = self.rfile.read(length).decode("utf-8")
+                data = json.loads(raw) if raw else {}
+                bank_name = data.get("bankName", "")
+                images = data.get("images") or []
+                if not bank_name:
+                    raise ValueError("缺少题库名称")
+                paths = decode_and_save_images(bank_name, images)
+                self.send_json({"ok": True, "paths": paths})
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, 400)
+            return
+        if self.path.startswith("/api/save-source-bank"):
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                raw = self.rfile.read(length).decode("utf-8")
+                data = json.loads(raw) if raw else {}
+                source_file = data.get("sourceFile", "")
+                bank_name = data.get("bankName", "")
+                questions = data.get("questions") or []
+                # Determine output path
+                source_path = None
+                if source_file:
+                    source_path = Path(source_file)
+                    if not source_path.is_absolute():
+                        candidates = [
+                            APP_ROOT / source_path,
+                            APP_ROOT.parent / source_path,
+                        ]
+                        for candidate in candidates:
+                            if candidate.exists():
+                                source_path = candidate
+                                break
+                        if source_path == Path(source_file):
+                            # Not resolved to existing — create in APP_ROOT
+                            source_path = APP_ROOT / source_path
+                elif bank_name:
+                    source_path = APP_ROOT / bank_name / "题库.json"
+                else:
+                    raise ValueError("缺少 sourceFile 或 bankName")
+                cleaned = []
+                for q in questions:
+                    stem_imgs = q.get("_stemImagePaths") or q.get("stemImages", [])
+                    ans_imgs = q.get("_answerImagePaths") or q.get("answerImages", [])
+                    opt_imgs_raw = q.get("_optionImagePaths") or q.get("optionImages", {})
+                    # Auto-convert any remaining data URLs to files
+                    stem_imgs = decode_and_save_images(bank_name, stem_imgs)
+                    ans_imgs = decode_and_save_images(bank_name, ans_imgs)
+                    opt_imgs = {}
+                    for letter, paths in (opt_imgs_raw or {}).items():
+                        opt_imgs[letter.upper()] = decode_and_save_images(bank_name, paths)
+                    cleaned.append({
+                        "题型": q.get("normalizedType") or q.get("type", "问答题"),
+                        "题干": q.get("stem", ""),
+                        "选项": q.get("options", []),
+                        "答案": q.get("answer", ""),
+                        "解析": q.get("analysis", ""),
+                        "题干图片": stem_imgs,
+                        "选项图片": opt_imgs,
+                        "答案图片": ans_imgs,
+                    })
+                source_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = source_path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(cleaned, ensure_ascii=False, indent=2), encoding="utf-8")
+                tmp.replace(source_path)
+                self.send_json({"ok": True})
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, 400)
+            return
         if self.path.startswith("/api/save-data"):
             try:
                 length = int(self.headers.get("Content-Length", "0"))
